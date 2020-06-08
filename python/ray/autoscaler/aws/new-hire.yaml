@@ -1,0 +1,38 @@
+cluster_name: development
+
+initial_workers: 1
+min_workers: 1
+max_workers: 2
+
+provider:
+    type: aws
+    region: us-west-2
+    availability_zone: us-west-2b
+    cache_stopped_nodes: false
+
+auth:
+    ssh_user: ubuntu
+
+head_node:
+    InstanceType: c5.4xlarge
+    ImageId: latest_dlami # Deep Learning AMI (Ubuntu 18.04) Version 27.0
+    SecurityGroupIds:
+      - sg-09138cb627a70235c # TODO: replace with security group created during new hire onboarding
+
+worker_nodes:
+    InstanceType: r5n.2xlarge
+    ImageId: latest_dlami # Deep Learning AMI (Ubuntu 18.04) Version 27.0
+    SecurityGroupIds:
+      - sg-09138cb627a70235c # TODO: replace with security group created during new hire onboardin
+
+file_mounts: {
+    "/tmp/current_branch_sha": "/Users/zyiqin/Documents/codebase/ray/.git/refs/heads/master",
+}
+
+setup_commands:
+    - pip install -U https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-0.9.0.dev0-cp36-cp36m-manylinux1_x86_64.whl
+    - echo "hello world @@@@@@@@@\n"
+    - test -e ray || git clone https://github.com/<REPO_ORG>/<REPO_NAME>.git
+    - cd ray && git fetch && git checkout `cat /tmp/current_branch_sha`
+#    - curl https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/awslogs-agent-setup.py -O
+#    - sudo python ./awslogs-agent-setup.py --region us-west-2
