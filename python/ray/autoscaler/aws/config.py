@@ -4,6 +4,7 @@ import json
 import os
 import time
 import logging
+from pdb import set_trace as bp
 
 import boto3
 from botocore.config import Config
@@ -62,6 +63,8 @@ logging.getLogger("botocore").setLevel(logging.WARNING)
 def bootstrap_aws(config):
     # The head node needs to have an IAM role that allows it to create further
     # EC2 instances.
+    bp()
+    print("..................................bootstrap")
     config = _configure_iam_role(config)
 
     # Configure SSH access, using an existing key pair if possible.
@@ -74,7 +77,14 @@ def bootstrap_aws(config):
     # the group, and also SSH access from outside.
     config = _configure_security_group(config)
 
+    # cloudwatch agent?
+    # config =  default maybe false
+    # [June 5, 2020, 4:17 PM] Ames, Patrick: dont't apply again ...idempotent 10 configure, one-time configure, everything
+    # [June 5, 2020, 4:17 PM] Ames, Patrick: configure same,same result...and deterministic, same configure again 10 accounts,
+    # apply same configure, deleting everything , apply again appearing samething
     # Provide a helpful message for missing AMI.
+    config = _configure_cloudwatch_logs(config)
+    # impossible to be ? document why
     _check_ami(config)
 
     return config
@@ -107,20 +117,39 @@ def _configure_iam_role(config):
             iam.create_role(
                 RoleName=DEFAULT_RAY_IAM_ROLE,
                 AssumeRolePolicyDocument=json.dumps({
-                    "Statement": [
-                        {
-                            "Effect": "Allow",
-                            "Principal": {
-                                "Service": "ec2.amazonaws.com"
-                            },
-                            "Action": "sts:AssumeRole",
+                    "Statement": [{
+                        "Effect": "Allow",
+                        "Principal": {
+                            "Service": "ec2.amazonaws.com"
                         },
-                    ],
+                        "Action": "sts:AssumeRole",
+                    }, {
+                        "Action": "sts:AssumeRole",
+                        "Effect": "Allow",
+                        "Principal": {
+                            "Service": "s3.amazonaws.com"
+                        }
+                    }, {
+                        "Action": "sts:AssumeRole",
+                        "Effect": "Allow",
+                        "Principal": {
+                            "Service": "logs.amazonaws.com"
+                        },
+                        "Sid": ""
+                    }, {
+                        "Effect": "Allow",
+                        "Action": [
+                            "logs:CreateLogGroup", "logs:CreateLogStream",
+                            "logs:PutLogEvents", "logs:DescribeLogStreams"
+                        ],
+                    }],
                 }))
             role = _get_role(DEFAULT_RAY_IAM_ROLE, config)
             assert role is not None, "Failed to create role"
         role.attach_policy(
             PolicyArn="arn:aws:iam::aws:policy/AmazonEC2FullAccess")
+        role.attach_policy(
+            PolicyArn="arn:aws:iam::aws:policy/AmazonS3FullAccess")
         role.attach_policy(
             PolicyArn="arn:aws:iam::aws:policy/AmazonS3FullAccess")
         profile.add_role(RoleName=role.name)
@@ -129,6 +158,7 @@ def _configure_iam_role(config):
     logger.info("_configure_iam_role: "
                 "Role not specified for head node, using {}".format(
                     profile.arn))
+    logger.info(" test  tsests")
     config["head_node"]["IamInstanceProfile"] = {"Arn": profile.arn}
 
     return config
@@ -397,3 +427,29 @@ def _resource(name, config):
         config["provider"]["region"],
         config=boto_config,
         **aws_credentials)
+
+
+# new work
+def _configure_cloudwatch_logs(config):
+    logs = boto3.client('logs')
+
+    LOG_GROUP = 'raytest1'
+    LOG_STREAM = 'rayteststream1'
+
+    logs.create_log_group(logGroupName=LOG_GROUP)
+    logs.create_log_stream(logGroupName=LOG_GROUP, logStreamName=LOG_STREAM)
+
+    timestamp = int(round(time.time() * 1000))
+
+    response = logs.put_log_events(
+        logGroupName=LOG_GROUP,
+        logStreamName=LOG_STREAM,
+        logEvents=[{
+            'timestamp': timestamp,
+            'message': time.strftime('%Y-%m-%d %H:%M:%S') +
+            '\tHello world, here is our first log message!'
+        }])
+    logger.info(
+        "12345566778....................................................")
+    print("12345566778.....................................................")
+    return response

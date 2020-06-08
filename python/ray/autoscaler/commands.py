@@ -8,6 +8,7 @@ import logging
 import sys
 import click
 import random
+from pdb import set_trace as bp
 
 import yaml
 try:  # py3
@@ -75,8 +76,8 @@ def teardown_cluster(config_file, yes, workers_only, override_cluster_name,
         config["cluster_name"] = override_cluster_name
     config = fillout_defaults(config)
     validate_config(config)
-
-    confirm("This will destroy your cluster", yes)
+    logger.info("testttt")
+    confirm("This will destroy your  test cluster", yes)
 
     provider = get_node_provider(config["provider"], config["cluster_name"])
     try:
@@ -123,8 +124,6 @@ def kill_node(config_file, yes, hard, override_cluster_name):
     if override_cluster_name is not None:
         config["cluster_name"] = override_cluster_name
     config = _bootstrap_config(config)
-
-    confirm("This will kill a node in your cluster", yes)
 
     provider = get_node_provider(config["provider"], config["cluster_name"])
     try:
@@ -185,7 +184,9 @@ def get_or_create_head_node(config, config_file, no_restart, restart_only, yes,
             head_node = None
 
         if not head_node:
-            confirm("This will create a new cluster", yes)
+            bp()
+            logger.info("testttt")
+            confirm("This will create a new test cluster", yes)
         elif not no_restart:
             confirm("This will restart cluster services", yes)
 
@@ -199,6 +200,7 @@ def get_or_create_head_node(config, config_file, no_restart, restart_only, yes,
                     "get_or_create_head_node: "
                     "Shutting down outdated head node {}".format(head_node))
                 provider.terminate_node(head_node)
+            bp()
             logger.info("get_or_create_head_node: Launching new head node...")
             head_node_tags[TAG_RAY_LAUNCH_CONFIG] = launch_hash
             head_node_tags[TAG_RAY_NODE_NAME] = "ray-{}-head".format(
@@ -219,6 +221,7 @@ def get_or_create_head_node(config, config_file, no_restart, restart_only, yes,
         # TODO(ekl) right now we always update the head node even if the hash
         # matches. We could prompt the user for what they want to do here.
         runtime_hash = hash_runtime_conf(config["file_mounts"], config)
+        bp()
         logger.info("get_or_create_head_node: Updating files on head node...")
 
         # Rewrite the auth config so that the head node can update the workers
