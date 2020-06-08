@@ -26,14 +26,14 @@ worker_nodes:
       - sg-09138cb627a70235c # TODO: replace with security group created during new hire onboardin
 
 file_mounts: {
-    "/tmp/current_branch_sha": "/ray/.git/refs/heads/master",
+    "/tmp/current_branch_sha": "/Users/zyiqin/Documents/codebase/ray/.git/refs/heads/master",
 }
 
 setup_commands:
     - pip install -U https://s3-us-west-2.amazonaws.com/ray-wheels/latest/ray-0.9.0.dev0-cp36-cp36m-manylinux1_x86_64.whl
     - echo "hello world @@@@@@@@@\n"
-#    - git clone --single-branch --branch ray_log https://github.com/yiqinzhu/ray.git || true
-    - test -e ray || git clone https://github.com/yiqinzhu/ray.git
-    - cd ray && git fetch && git checkout `cat /tmp/current_branch_sha`
+    - git clone --single-branch --branch ray_log https://github.com/yiqinzhu/ray.git || true
+#    - test -e ray || git clone https://github.com/yiqinzhu/ray.git
+#    - cd ray && git fetch && git checkout `cat /tmp/current_branch_sha`
 #    - curl https://s3.amazonaws.com/aws-cloudwatch/downloads/latest/awslogs-agent-setup.py -O
 #    - sudo python ./awslogs-agent-setup.py --region us-west-2
