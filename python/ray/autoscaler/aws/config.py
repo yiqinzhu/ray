@@ -23,6 +23,8 @@ logger = logging.getLogger(__name__)
 
 RAY = "ray-autoscaler"
 DEFAULT_RAY_INSTANCE_PROFILE = RAY + "-v1"
+CLOUDWATCH_RAY_INSTANCE_PROFILE = RAY + "-cloudwatch-v1"
+CLOUDWATCH_RAY_IAM_ROLE = RAY + "-cloudwatch-v1"
 DEFAULT_RAY_IAM_ROLE = RAY + "-v1"
 SECURITY_GROUP_TEMPLATE = RAY + "-{}"
 
@@ -209,6 +211,10 @@ def _configure_iam_role(config):
         return config
     _set_config_info(head_instance_profile_src="default")
 
+    cwa_cfg_exists = _cloudwatch_config_exists(config, "agent", "config")
+    instance_profile_name = CLOUDWATCH_RAY_INSTANCE_PROFILE if cwa_cfg_exists \
+        else DEFAULT_RAY_INSTANCE_PROFILE
+
     profile = _get_instance_profile(DEFAULT_RAY_INSTANCE_PROFILE, config)
 
     if profile is None:
@@ -217,7 +223,7 @@ def _configure_iam_role(config):
             cf.bold(DEFAULT_RAY_INSTANCE_PROFILE))
         cli_logger.old_info(
             logger, "_configure_iam_role: "
-            "Creating new instance profile {}", DEFAULT_RAY_INSTANCE_PROFILE)
+                    "Creating new instance profile {}", DEFAULT_RAY_INSTANCE_PROFILE)
         client = _client("iam", config)
         client.create_instance_profile(
             InstanceProfileName=DEFAULT_RAY_INSTANCE_PROFILE)
@@ -229,6 +235,8 @@ def _configure_iam_role(config):
     assert profile is not None, "Failed to create instance profile"
 
     if not profile.roles:
+        role_name = CLOUDWATCH_RAY_IAM_ROLE if cwa_cfg_exists \
+            else DEFAULT_RAY_IAM_ROLE
         role = _get_role(DEFAULT_RAY_IAM_ROLE, config)
         if role is None:
             cli_logger.verbose(
@@ -236,39 +244,69 @@ def _configure_iam_role(config):
                 "use as the default instance role.",
                 cf.bold(DEFAULT_RAY_IAM_ROLE))
             cli_logger.old_info(logger, "_configure_iam_role: "
-                                "Creating new role {}", DEFAULT_RAY_IAM_ROLE)
+                                        "Creating new role {}", role_name)
             iam = _resource("iam", config)
-            iam.create_role(
-                RoleName=DEFAULT_RAY_IAM_ROLE,
-                AssumeRolePolicyDocument=json.dumps({
-                    "Statement": [
-                        {
-                            "Effect": "Allow",
-                            "Principal": {
-                                "Service": "ec2.amazonaws.com"
-                            },
-                            "Action": "sts:AssumeRole",
+            policy_doc = {
+                "Statement": [
+                    {
+                        "Effect": "Allow",
+                        "Principal": {
+                            "Service": "ec2.amazonaws.com"
                         },
-                    ],
-                }))
-            role = _get_role(DEFAULT_RAY_IAM_ROLE, config)
+                        "Action": "sts:AssumeRole",
+                    },
+                ]
+            }
+            attach_policy_arns = [
+                "arn:aws:iam::aws:policy/AmazonEC2FullAccess",
+                "arn:aws:iam::aws:policy/AmazonS3FullAccess"
+            ]
 
+            if cwa_cfg_exists:
+                _add_cloudwatch_agent_policies(policy_doc, attach_policy_arns)
+
+            iam.create_role(
+                RoleName=role_name,
+                AssumeRolePolicyDocument=json.dump(policy_doc))
+            role = _get_role(role_name, config)
             cli_logger.doassert(role is not None,
                                 "Failed to create role.")  # todo: err msg
+
             assert role is not None, "Failed to create role"
-        role.attach_policy(
-            PolicyArn="arn:aws:iam::aws:policy/AmazonEC2FullAccess")
-        role.attach_policy(
-            PolicyArn="arn:aws:iam::aws:policy/AmazonS3FullAccess")
+
+            for policy_arn in attach_policy_arns:
+                role.attach_policy(PolicyArn=policy_arn)
+
         profile.add_role(RoleName=role.name)
         time.sleep(15)  # wait for propagation
 
     cli_logger.old_info(
         logger, "_configure_iam_role: "
-        "Role not specified for head node, using {}", profile.arn)
+                "Role not specified for head node, using {}", profile.arn)
     config["head_node"]["IamInstanceProfile"] = {"Arn": profile.arn}
 
     return config
+
+
+def _add_cloudwatch_agent_policies(policy_doc, attach_policy_arns):
+    policy_doc["Statement"].extend([{
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+            "Service": "s3.amazonaws.com"
+        }
+    }, {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+            "Service": "logs.amazonaws.com"
+        },
+        "Sid": ""
+    }])
+    attach_policy_arns.extend([
+        "arn:aws:iam::aws:policy/CloudWatchFullAccess",
+        "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
+    ])
 
 
 def _configure_key_pair(config):
@@ -717,3 +755,12 @@ def _resource_cache(name, region, **kwargs):
         config=boto_config,
         **kwargs,
     )
+
+
+def _cloudwatch_config_exists(config, section_name, file_name):
+    # helper func : check if cloudwatch config exists
+    cfg = config.get("cloudwatch", {}).get(section_name, {}).get(file_name)
+    if cfg:
+        assert os.path.isfile(cfg), \
+            "Invalid CloudWatch Dashboard Config File Path: {}".format(cfg)
+    return bool(cfg)
