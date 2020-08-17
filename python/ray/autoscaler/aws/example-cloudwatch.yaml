@@ -11,15 +11,15 @@ provider:
     cache_stopped_nodes: false
     cloudwatch:
         agent:
-            config: "Path to CloudWatch Agent config file. See https://docs.aws.amazon.com/AmazonCloudWatch/latest/monitoring/CloudWatch-Agent-Configuration-File-Details.html for additional details."
+            config: "cloudwatch/example-cloudwatch-agent-config.json"
             retryer:
                 max_attempts: 20
                 delay_seconds: 2
         dashboard:
-            name: "example-cluster-name"
-            config: "Path to CloudWatch Dashboard config file. See https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/CloudWatch-Dashboard-Body-Structure.html for additional details."
+            name: "example-dashboard-name"
+            config: "cloudwatch/example-cloudwatch-dashboard-config.json"
         alarm:
-            config: "Path to CloudWatch Alarm config file. See https://docs.aws.amazon.com/AmazonCloudWatch/latest/APIReference/API_PutMetricAlarm.html for additional details."
+            config: "cloudwatch/example-cloudwatch-alarm-config.json"
 
 auth:
     ssh_user: ubuntu
@@ -28,6 +28,7 @@ head_node:
     InstanceType: c5.4xlarge
     ImageId: latest_dlami # Deep Learning AMI (Ubuntu 18.04) Version 27.0
     SecurityGroupIds:
+
 
 worker_nodes:
     InstanceType: r5n.2xlarge

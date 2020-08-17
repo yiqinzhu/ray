@@ -7,9 +7,6 @@ import logging
 import boto3
 import botocore
 from botocore.config import Config
-import time
-import json
-import os
 
 from ray.autoscaler.node_provider import NodeProvider
 from ray.autoscaler.aws.config import bootstrap_aws
@@ -17,6 +14,8 @@ from ray.autoscaler.tags import TAG_RAY_CLUSTER_NAME, TAG_RAY_NODE_NAME, \
     TAG_RAY_LAUNCH_CONFIG, TAG_RAY_NODE_TYPE, TAG_RAY_INSTANCE_TYPE
 from ray.ray_constants import BOTO_MAX_RETRIES, BOTO_CREATE_MAX_RETRIES
 from ray.autoscaler.log_timer import LogTimer
+from ray.autoscaler.aws.cloudwatch.cloudwatch_helper import CloudwatchHelper, \
+    cloudwatch_config_exists
 
 from ray.autoscaler.aws.utils import boto_exception_handler
 from ray.autoscaler.cli_logger import cli_logger
@@ -371,21 +370,24 @@ class AWSNodeProvider(NodeProvider):
                     cli_logger.abort(exc)
                     cli_logger.old_error(logger, exc)
 
+        node_ids = [n.id for n in created]
         # check if user specifies a cloudwatch agent config file path.
         # if so, install and run the agent
-        if _cloudwatch_config_exists(self.provider_config, "agent", "config"):
-            self._ssm_install_cloudwatch(created)
+        cloudwatch_helper = CloudwatchHelper(self.provider_config, node_ids,
+                                             self.cluster_name)
+        if cloudwatch_config_exists(self.provider_config, "agent", "config"):
+            cloudwatch_helper.ssm_install_cloudwatch_agent()
 
         # check if user specifies a cloudwatch dashboard config file path.
         # if so, put cloudwatch dashboard
-        if _cloudwatch_config_exists(self.provider_config, "dashboard",
-                                     "config"):
-            self._put_cloudwatch_dashboard(created)
+        if cloudwatch_config_exists(self.provider_config, "dashboard",
+                                    "config"):
+            cloudwatch_helper.put_cloudwatch_dashboard()
 
         # check if user specifies a cloudwatch alarm config file path.
         # if so, put cloudwatch alarms
-        if _cloudwatch_config_exists(self.provider_config, "alarm", "config"):
-            self._put_cloudwatch_alarm(created)
+        if cloudwatch_config_exists(self.provider_config, "alarm", "config"):
+            cloudwatch_helper.put_cloudwatch_alarm()
 
     def terminate_node(self, node_id):
         node = self._get_cached_node(node_id)
@@ -493,174 +495,3 @@ class AWSNodeProvider(NodeProvider):
     @staticmethod
     def bootstrap_config(cluster_config):
         return bootstrap_aws(cluster_config)
-
-    def _ssm_install_cloudwatch(self, instances):
-        # automatically install cloudwatch agent using SSM
-        ssm_client = boto3.client("ssm")
-        ec2 = boto3.resource("ec2")
-        ec2_client = ec2.meta.client
-        node_ids = [n.id for n in instances]
-
-        # wait for all checks to be complete
-        try:
-            waiter = ec2_client.get_waiter("instance_status_ok")
-            waiter.wait(InstanceIds=node_ids)
-        except botocore.exceptions.WaiterError as e:
-            logger.error(
-                "Failed while waiting for EC2 instance checks to complete: {}".
-                format(e.message))
-        parameters_cwa_install = {
-            "action": ["Install"],
-            "name": ["AmazonCloudWatchAgent"],
-            "version": ["latest"]
-        }
-        response = self._send_command_to_all_nodes(
-            ssm_client, "AWS-ConfigureAWSPackage", parameters_cwa_install,
-            node_ids)
-        command_id = response["Command"]["CommandId"]
-        output = self._waiter_func(ssm_client, node_ids, command_id)
-        if output["Status"] == "Success":
-            logger.info(
-                "System manager has successfully installed cloudwatch agent "
-                "on: {} nodes".format(len(node_ids)))
-
-        # upload cloudwatch config file to parameter store
-        config_path = self.provider_config["cloudwatch"].get("agent",
-                                                             {}).get("config")
-        with open(config_path) as f:
-            data = json.load(f)
-        self._find_value(data, self.replace_value, str(node_ids))
-        ssm_client.put_parameter(
-            Name="cloudwatch_config_for_ray",
-            Type="String",
-            Value=json.dumps(data),
-            Overwrite=True)
-
-        parameters_run_shell = {
-            "commands": [
-                "mkdir -p /usr/share/collectd/",
-                "touch /usr/share/collectd/types.db"
-            ],
-        }
-        self._send_command_to_all_nodes(ssm_client, "AWS-RunShellScript",
-                                        parameters_run_shell, node_ids)
-
-        # start the cloudwatch agent
-        parameters_start_cwa = {
-            "action": ["configure"],
-            "mode": ["ec2"],
-            "optionalConfigurationSource": ["ssm"],
-            "optionalConfigurationLocation": ["cloudwatch_config_for_ray"],
-            "optionalRestart": ["yes"],
-        }
-        self._send_command_to_all_nodes(ssm_client,
-                                        "AmazonCloudWatch-ManageAgent",
-                                        parameters_start_cwa, node_ids)
-
-    def _put_cloudwatch_dashboard(self, created):
-        # put dashboard to cloudwatch console
-        config_path = self.provider_config["cloudwatch"].get("dashboard",
-                                                             {}).get("config")
-        cloudwatch_client = boto3.client("cloudwatch")
-        dashboard_name = self.provider_config["cloudwatch"].get(
-            "dashboard", {}).get("name", self.cluster_name)
-        with open(config_path) as f:
-            data = json.load(f)
-        widgets = []
-        for node in created:
-            for item in data:
-                self._find_value(item, self.replace_value, str(node.id))
-                widgets.append(item)
-            response = cloudwatch_client.put_dashboard(
-                DashboardName=dashboard_name,
-                DashboardBody=json.dumps({
-                    "widgets": widgets
-                }))
-            issue_count = len(response.get("DashboardValidationMessages", []))
-            if issue_count > 0:
-                for issue in response.get("DashboardValidationMessages"):
-                    logging.error("Error in dashboard config: {} - {}".format(
-                        issue["Message"], issue["DataPath"]))
-                raise Exception(
-                    "Errors in dashboard configuration: {} issues raised".
-                    format(issue_count))
-            else:
-                logger.info("Successfully put dashboard to cloudwatch console")
-
-    def _put_cloudwatch_alarm(self, created):
-        # put alarms to cloudwatch console
-        config_path = self.provider_config["cloudwatch"].get("alarm",
-                                                             {}).get("config")
-        with open(config_path) as f:
-            data = json.load(f)
-        cloudwatch_client = boto3.client("cloudwatch")
-        for node in created:
-            for item in data:
-                self._find_value(item, self.replace_value, str(node.id))
-                cloudwatch_client.put_metric_alarm(**item)
-        logger.info("Successfully put alarms to cloudwatch console")
-
-    def _send_command_to_all_nodes(self, ssm_client, document_name, parameters,
-                                   node_ids):
-        # helper func : SSM send command to nodes
-        response = ssm_client.send_command(
-            InstanceIds=node_ids,
-            DocumentName=document_name,
-            Parameters=parameters,
-            MaxConcurrency=str(min(len(node_ids), 100)),
-            MaxErrors="0")
-        return response
-
-    def _waiter_func(self, ssm_client, node_ids, command_id):
-        # helper func: wait for SSM send command to complete
-        max_attempts = self.provider_config["cloudwatch"].get("agent").get(
-            "retryer", {}).get("max_attempts", 20)
-        delay_seconds = self.provider_config["cloudwatch"].get("agent").get(
-            "retryer", {}).get("delay_seconds", 2)
-        try:
-            for attempt in range(0, max_attempts):
-                # wait for the SSM invocation to exist
-                time.sleep(delay_seconds)
-                output_response = ssm_client.get_command_invocation(
-                    CommandId=command_id,
-                    InstanceId=node_ids[0],
-                )
-                if output_response and output_response["Status"] == "Success":
-                    return output_response
-        except botocore.exceptions.WaiterError as exc:
-            if attempt >= max_attempts - 1:
-                logger.info(
-                    "get_command_invocation: Max attempts ({}) exceeded.".
-                    format(max_attempts))
-                raise exc
-
-    def _replace_value(self, s, node_id):
-        # helper func : format json config file
-        return s.replace("{region}", self.provider_config["region"]).\
-            replace("{instance_id}", node_id).\
-            replace("{cluster_name}", self.cluster_name)
-
-    def _find_value(self, l, f, node_id):
-        # helper func : format json config file
-        if type(l) is dict:
-            for key, value in l.items():
-                if type(value) is dict or type(value) is list:
-                    l[key] = self.find_value(l[key], f, node_id)
-                elif type(value) is str:
-                    l[key] = f(value, node_id)
-        if type(l) is list:
-            for i in range(len(l)):
-                if type(l[i]) is dict or type(l[i]) is list:
-                    l[i] = self.find_value(l[i], f, node_id)
-                elif type(l[i]) is str:
-                    l[i] = f(l[i], node_id)
-        return l
-
-
-def _cloudwatch_config_exists(config, section_name, file_name):
-    # helper func : check if cloudwatch config exists
-    cfg = config.get("cloudwatch", {}).get(section_name, {}).get(file_name)
-    if cfg:
-        assert os.path.isfile(cfg), \
-            "Invalid CloudWatch Config File Path: {}".format(cfg)
-    return bool(cfg)

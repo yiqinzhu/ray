@@ -8,13 +8,14 @@ import time
 import logging
 
 import boto3
-from botocore.config import Config
 import botocore
 
-from ray.ray_constants import BOTO_MAX_RETRIES
 from ray.autoscaler.tags import NODE_TYPE_WORKER, NODE_TYPE_HEAD
-from ray.autoscaler.aws.utils import LazyDefaultDict, handle_boto_error
+from ray.autoscaler.aws.utils import LazyDefaultDict, handle_boto_error, \
+    resource_cache
 from ray.autoscaler.node_provider import PROVIDER_PRETTY_NAMES
+from ray.autoscaler.aws.cloudwatch.cloudwatch_helper \
+    import cloudwatch_config_exists
 
 from ray.autoscaler.cli_logger import cli_logger
 import colorful as cf
@@ -211,11 +212,10 @@ def _configure_iam_role(config):
         return config
     _set_config_info(head_instance_profile_src="default")
 
-    cwa_cfg_exists = _cloudwatch_config_exists(config, "agent", "config")
+    cwa_cfg_exists = cloudwatch_config_exists(config, "agent", "config")
     instance_profile_name = CLOUDWATCH_RAY_INSTANCE_PROFILE if cwa_cfg_exists \
         else DEFAULT_RAY_INSTANCE_PROFILE
-
-    profile = _get_instance_profile(DEFAULT_RAY_INSTANCE_PROFILE, config)
+    profile = _get_instance_profile(instance_profile_name, config)
 
     if profile is None:
         cli_logger.verbose(
@@ -223,7 +223,7 @@ def _configure_iam_role(config):
             cf.bold(DEFAULT_RAY_INSTANCE_PROFILE))
         cli_logger.old_info(
             logger, "_configure_iam_role: "
-                    "Creating new instance profile {}", DEFAULT_RAY_INSTANCE_PROFILE)
+            "Creating new instance profile {}", DEFAULT_RAY_INSTANCE_PROFILE)
         client = _client("iam", config)
         client.create_instance_profile(
             InstanceProfileName=DEFAULT_RAY_INSTANCE_PROFILE)
@@ -237,14 +237,14 @@ def _configure_iam_role(config):
     if not profile.roles:
         role_name = CLOUDWATCH_RAY_IAM_ROLE if cwa_cfg_exists \
             else DEFAULT_RAY_IAM_ROLE
-        role = _get_role(DEFAULT_RAY_IAM_ROLE, config)
+        role = _get_role(role_name, config)
         if role is None:
             cli_logger.verbose(
                 "Creating new IAM role {} for "
                 "use as the default instance role.",
                 cf.bold(DEFAULT_RAY_IAM_ROLE))
             cli_logger.old_info(logger, "_configure_iam_role: "
-                                        "Creating new role {}", role_name)
+                                "Creating new role {}", DEFAULT_RAY_IAM_ROLE)
             iam = _resource("iam", config)
             policy_doc = {
                 "Statement": [
@@ -280,33 +280,15 @@ def _configure_iam_role(config):
         profile.add_role(RoleName=role.name)
         time.sleep(15)  # wait for propagation
 
+    logger.info("_configure_iam_role: "
+                "Role not specified for head node, using {}".format(
+                    profile.arn))
     cli_logger.old_info(
         logger, "_configure_iam_role: "
-                "Role not specified for head node, using {}", profile.arn)
+        "Role not specified for head node, using {}", profile.arn)
     config["head_node"]["IamInstanceProfile"] = {"Arn": profile.arn}
 
     return config
-
-
-def _add_cloudwatch_agent_policies(policy_doc, attach_policy_arns):
-    policy_doc["Statement"].extend([{
-        "Action": "sts:AssumeRole",
-        "Effect": "Allow",
-        "Principal": {
-            "Service": "s3.amazonaws.com"
-        }
-    }, {
-        "Action": "sts:AssumeRole",
-        "Effect": "Allow",
-        "Principal": {
-            "Service": "logs.amazonaws.com"
-        },
-        "Sid": ""
-    }])
-    attach_policy_arns.extend([
-        "arn:aws:iam::aws:policy/CloudWatchFullAccess",
-        "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
-    ])
 
 
 def _configure_key_pair(config):
@@ -743,24 +725,25 @@ def _client(name, config):
 def _resource(name, config):
     region = config["provider"]["region"]
     aws_credentials = config["provider"].get("aws_credentials", {})
-    return _resource_cache(name, region, **aws_credentials)
+    return resource_cache(name, region, **aws_credentials)
 
 
-@lru_cache()
-def _resource_cache(name, region, **kwargs):
-    boto_config = Config(retries={"max_attempts": BOTO_MAX_RETRIES})
-    return boto3.resource(
-        name,
-        region,
-        config=boto_config,
-        **kwargs,
-    )
-
-
-def _cloudwatch_config_exists(config, section_name, file_name):
-    # helper func : check if cloudwatch config exists
-    cfg = config.get("cloudwatch", {}).get(section_name, {}).get(file_name)
-    if cfg:
-        assert os.path.isfile(cfg), \
-            "Invalid CloudWatch Dashboard Config File Path: {}".format(cfg)
-    return bool(cfg)
+def _add_cloudwatch_agent_policies(policy_doc, attach_policy_arns):
+    policy_doc["Statement"].extend([{
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+            "Service": "s3.amazonaws.com"
+        }
+    }, {
+        "Action": "sts:AssumeRole",
+        "Effect": "Allow",
+        "Principal": {
+            "Service": "logs.amazonaws.com"
+        },
+        "Sid": ""
+    }])
+    attach_policy_arns.extend([
+        "arn:aws:iam::aws:policy/CloudWatchFullAccess",
+        "arn:aws:iam::aws:policy/AmazonSSMFullAccess"
+    ])
